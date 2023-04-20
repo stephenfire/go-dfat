@@ -1,2 +1,2 @@
 # go-dfat
-Depth-First Attribute Traveller: An object attribute traversal based on depth-first algorithm
+Depth-First Property Traveller: An object property traversal based on depth-first algorithm
