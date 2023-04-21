@@ -151,8 +151,7 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin bool, inf
 						size = val.Len() << 1
 					}
 				case reflect.Struct:
-					fields = t._structProperties(val)
-					size = len(fields)
+					size, fields = t._structProperties(val)
 				case reflect.Ptr:
 					if !val.IsNil() {
 						size = 1
@@ -185,9 +184,9 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin bool, inf
 	return false, nil, nil
 }
 
-func (t *Traveller) _structProperties(val reflect.Value) []Property {
+func (t *Traveller) _structProperties(val reflect.Value) (int, []Property) {
 	if !val.IsValid() {
-		return nil
+		return 0, nil
 	}
 	if t.conf != nil && t.conf.Propertier != nil {
 		return t.conf.Propertier.Properties(val)
@@ -203,7 +202,7 @@ func (t *Traveller) _structProperties(val reflect.Value) []Property {
 			})
 		}
 	}
-	return ps
+	return len(ps), ps
 }
 
 func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
@@ -255,11 +254,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 				continue
 			}
 			fieldVal := val.Field(field.Index)
-			if field.IndexForReal >= 0 {
-				next.offset = field.IndexForReal
-			} else {
-				next.offset = field.Index
-			}
+			next.offset = i
 			if err = t._traverse(next, fieldVal); err != nil {
 				return err
 			}

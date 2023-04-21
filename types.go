@@ -119,7 +119,7 @@ type (
 	}
 
 	StructPropertier interface {
-		Properties(structVal reflect.Value) []Property // sorted by (IndexForReal, Index)
+		Properties(structVal reflect.Value) (size int, avails []Property) // sorted by (IndexForReal, Index)
 	}
 
 	TraverseConf struct {
@@ -390,10 +390,15 @@ func (p *parentInfo) isValid() bool {
 func (p *parentInfo) callIns(val reflect.Value) []reflect.Value {
 	ret := make([]reflect.Value, 3)
 	if p != nil && p.value.IsValid() {
-		ret[0] = reflect.ValueOf(p.offset)
 		if len(p.structFields) > 0 && p.offset >= 0 && p.offset < len(p.structFields) {
+			if p.structFields[p.offset].IndexForReal >= 0 {
+				ret[0] = reflect.ValueOf(p.structFields[p.offset].IndexForReal)
+			} else {
+				ret[0] = reflect.ValueOf(p.structFields[p.offset].Index)
+			}
 			ret[1] = reflect.ValueOf(p.structFields[p.offset].Name)
 		} else {
+			ret[0] = reflect.ValueOf(p.offset)
 			ret[1] = reflect.ValueOf("")
 		}
 	} else {

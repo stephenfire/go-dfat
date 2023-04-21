@@ -20,6 +20,9 @@ package dfpt
 import (
 	"fmt"
 	"reflect"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +55,73 @@ func (p parser0) ForContainerStruct(indexOfParent, size int, startOrEnd bool, na
 	return true, nil
 }
 
+type rtlpropertier struct{}
+
+func (p rtlpropertier) Properties(val reflect.Value) (size int, fields []Property) {
+	if !val.IsValid() || val.Type().Kind() != reflect.Struct {
+		return 0, nil
+	}
+	typ := val.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		// exported field
+		if f := typ.Field(i); f.PkgPath == "" {
+			tagStr := f.Tag.Get("rtl")
+			ignored := false
+			for _, tag := range strings.Split(tagStr, ",") {
+				switch tag = strings.TrimSpace(tag); tag {
+				case "-":
+					ignored = true
+				}
+			}
+			if ignored {
+				continue
+			}
+
+			order := -1
+			tagStr = f.Tag.Get("rtlorder")
+			tagStr = strings.TrimSpace(tagStr)
+			if len(tagStr) > 0 {
+				if oi, err := strconv.Atoi(tagStr); err != nil {
+					panic(fmt.Errorf("illegal rtlorder (%s) for field %s of type %s",
+						tagStr, f.Name, typ.Name()))
+				} else {
+					if oi < 0 {
+						panic(fmt.Errorf("illegal rtlorder (%s) for field %s of type %s",
+							tagStr, f.Name, typ.Name()))
+					}
+					order = oi
+				}
+			}
+
+			fields = append(fields, Property{i, f.Name, order})
+		}
+	}
+	sort.SliceStable(fields, func(i, j int) bool {
+		if fields[i].IndexForReal > fields[j].IndexForReal {
+			return false
+		}
+		if fields[i].IndexForReal < fields[j].IndexForReal {
+			return true
+		}
+		return fields[i].Index < fields[j].Index
+	})
+	for i := 0; i < len(fields); i++ {
+		if fields[i].IndexForReal < 0 {
+			fields[i].IndexForReal = i
+		} else {
+			if fields[i].IndexForReal < i {
+				panic(fmt.Errorf("illegal rtlorder (%d) for field %s of type %s, should >= %d",
+					fields[i].IndexForReal, fields[i].Name, typ.Name(), i))
+			}
+		}
+	}
+	size = 0
+	if len(fields) > 0 {
+		size = fields[len(fields)-1].IndexForReal + 1
+	}
+	return
+}
+
 func TestStruct(t *testing.T) {
 	i := &Inner0{
 		A: 1,
@@ -63,6 +133,7 @@ func TestStruct(t *testing.T) {
 		y: 7,
 	}
 	p := parser0{}
+	// tr, err := NewTraveller(p, &TraverseConf{Propertier: rtlpropertier{}})
 	tr, err := NewTraveller(p)
 	if err != nil {
 		t.Fatal(err)
