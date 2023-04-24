@@ -38,20 +38,24 @@ type Inner0 struct {
 
 type parser0 struct{}
 
-func (p parser0) ForAssign0(indexOfParent int, name string, property int) error {
-	fmt.Printf("ForAssign0(Index:%d name:%s prop:%d)\n", indexOfParent, name, property)
+func (p parser0) ForAssign0(depth, indexOfParent int, name string, property int) error {
+	fmt.Printf("ForAssign0(Depth:%d Index:%d name:%s prop:%d)\n", depth, indexOfParent, name, property)
 	return nil
 }
 
-func (p parser0) ForContainerPtr(indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
-	fmt.Printf("ForKindPtr(index:%d size:%d start:%t name:%s property:%s)\n",
-		indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
+func (p parser0) ForContainerStruct(depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
+	fmt.Printf("ForContainerStruct(depth:%d index:%d size:%d start:%t name:%s property:%s)\n",
+		depth, indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
 	return true, nil
 }
 
-func (p parser0) ForContainerStruct(indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
-	fmt.Printf("ForContainerStruct(index:%d size:%d start:%t name:%s property:%s)\n",
-		indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
+type parser1 struct {
+	parser0
+}
+
+func (p parser1) ForContainerPtr(depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
+	fmt.Printf("ForKindPtr(depth:%d index:%d size:%d start:%t name:%s property:%s)\n",
+		depth, indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
 	return true, nil
 }
 
@@ -132,9 +136,54 @@ func TestStruct(t *testing.T) {
 		x: 6,
 		y: 7,
 	}
+	var i1 *Inner0
+
+	{
+		t.Log("parser0")
+		p := parser0{}
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = tr.Traverse(i); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Log("nil")
+		if err = tr.Traverse(i1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	{
+		t.Log("parser1")
+		p := parser1{}
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = tr.Traverse(i); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Log("nil")
+		if err = tr.Traverse(i1); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestWithSelfParser(t *testing.T) {
+	i := &Inner0{
+		A: 1,
+		E: 2,
+		B: 3,
+		C: 4,
+		D: 5,
+		x: 6,
+		y: 7,
+	}
 	p := parser0{}
-	// tr, err := NewTraveller(p, &TraverseConf{Propertier: rtlpropertier{}})
-	tr, err := NewTraveller(p)
+	tr, err := NewTraveller(p, &TraverseConf{Propertier: rtlpropertier{}, PtrAutoGoIn: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -55,7 +55,7 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 		fType := m.Func.Type()
 		switch itype {
 		case ForImpl, ForAssign:
-			inType := fType.In(3)
+			inType := fType.In(itype.ParamLength())
 			if _, exist := typeMethods[inType]; exist {
 				return nil, fmt.Errorf("duplicated binding function %s found for Type:%s", m.Name, inType.Name())
 			}
@@ -115,9 +115,9 @@ func (t *Traveller) String() string {
 		adapterStr, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
 }
 
-func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin bool, info *parentInfo, err error) {
+func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter bool, info *parentInfo, newVal reflect.Value, err error) {
 	if !val.IsValid() {
-		return false, nil, errors.New("invalid value")
+		return false, false, nil, reflect.Value{}, errors.New("invalid value")
 	}
 	for i, item := range t.typeOrder {
 		typ, kind, match := item.match(val.Type())
@@ -158,6 +158,7 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin bool, inf
 					}
 				}
 				info = &parentInfo{
+					depth:        parent.nextDepth(),
 					value:        val,
 					size:         size,
 					offset:       -1,
@@ -173,15 +174,25 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin bool, inf
 		}
 		goin, err = item.parseReturns(outs)
 		if err != nil {
-			return false, nil, err
+			return false, false, nil, reflect.Value{}, err
 		}
-		return goin, info, nil
+		return goin, false, info, reflect.Value{}, nil
+	}
+	if t.conf != nil && t.conf.PtrAutoGoIn {
+		if val.Type().Kind() == reflect.Ptr {
+			if val.IsNil() == false {
+				newVal = val.Elem()
+				return false, true, parent, newVal, nil
+			} else {
+				return false, false, parent, reflect.Value{}, nil
+			}
+		}
 	}
 	if t.conf == nil || !t.conf.IgnoreMissedBinding {
-		return false, nil, fmt.Errorf("type:%s kind:%s binding is missing",
-			val.Type(), val.Type().Kind())
+		return false, false, nil, reflect.Value{},
+			fmt.Errorf("type:%s kind:%s binding is missing", val.Type(), val.Type().Kind())
 	}
-	return false, nil, nil
+	return false, false, nil, reflect.Value{}, nil
 }
 
 func (t *Traveller) _structProperties(val reflect.Value) (int, []Property) {
@@ -209,20 +220,35 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 	if !val.IsValid() {
 		return fmt.Errorf("invalid value in _traverse(parent:%s, val:%s)", parent, val.String())
 	}
-	goin, next, err := t._call(parent, val)
-	if err != nil {
-		return err
+	var next *parentInfo
+	var goin, reEnter bool
+	var err error
+	oldVal := val
+	var newVal reflect.Value
+	for {
+		goin, reEnter, next, newVal, err = t._call(parent, oldVal)
+		if err != nil {
+			return err
+		}
+		if reEnter {
+			if !newVal.IsValid() {
+				panic(fmt.Errorf("reenter need a valid value, oldVal:%s", oldVal))
+			}
+			oldVal = newVal
+			continue
+		}
+		if !goin {
+			return nil
+		}
+		if next == nil {
+			panic(fmt.Errorf("container value need next *parentInfo, parent:%s val:%s", parent, oldVal.String()))
+		}
+		break
 	}
-	if !goin {
-		return nil
-	}
-	if next == nil {
-		panic(fmt.Errorf("container value need next *parentInfo, parent:%s val:%s", parent, val.String()))
-	}
-	switch val.Kind() {
+	switch oldVal.Kind() {
 	case reflect.Array, reflect.Slice:
 		for i := 0; i < next.size; i++ {
-			child := val.Index(i)
+			child := oldVal.Index(i)
 			next.offset = i
 			if err = t._traverse(next, child); err != nil {
 				return err
@@ -230,7 +256,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 		}
 	case reflect.Map:
 		if next.size > 0 {
-			keys := val.MapKeys()
+			keys := oldVal.MapKeys()
 			if len(keys)<<1 != next.size {
 				panic(fmt.Errorf("next:%s but len(keys)==%d", next, len(keys)))
 			}
@@ -240,7 +266,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 				if err = t._traverse(next, keys[i]); err != nil {
 					return err
 				}
-				value := val.MapIndex(keys[i])
+				value := oldVal.MapIndex(keys[i])
 				next.offset = i<<1 + 1
 				if err = t._traverse(next, value); err != nil {
 					return err
@@ -253,7 +279,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 			if field.Index < 0 {
 				continue
 			}
-			fieldVal := val.Field(field.Index)
+			fieldVal := oldVal.Field(field.Index)
 			next.offset = i
 			if err = t._traverse(next, fieldVal); err != nil {
 				return err
@@ -261,7 +287,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 		}
 	case reflect.Ptr:
 		if next.size > 0 {
-			elem := val.Elem()
+			elem := oldVal.Elem()
 			next.offset = 0
 			if err = t._traverse(next, elem); err != nil {
 				return err
@@ -271,7 +297,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 		panic("unknown status")
 	}
 	if t.conf != nil && t.conf.ContainerEnd {
-		outs := next.binding.Call(parent.endContainerIns(next, val))
+		outs := next.binding.Call(parent.endContainerIns(next, oldVal))
 		_, err = orderItem{c: true}.parseReturns(outs)
 		if err != nil {
 			return fmt.Errorf("call container end failed: %v", err)

@@ -129,9 +129,14 @@ type (
 		Propertier StructPropertier
 		// whether to call the end method after the container ends
 		ContainerEnd bool
+		// When the ForContainerPtr method is not bound, auto is true and will be valid.
+		// When val.IsNil==true, val is directly ignored;
+		// when val.IsNil==false, the object pointed to by the pointer will be automatically called back.
+		PtrAutoGoIn bool
 	}
 
 	parentInfo struct {
+		depth        int
 		value        reflect.Value // container value
 		size         int           // container size: Array/Slice.Len(), len(Map.MapKeys())*2, len([]Property)
 		offset       int           // current calling child value index [0, size)
@@ -175,13 +180,13 @@ func (ItemType) Which(name string) (ItemType, reflect.Kind, bool) {
 
 // IsValidWithReceiver
 // binding function signatures:
-// ForImplxxxx(IndexInParent, PropertyName, Property) error
-// ForAssignxxxx(IndexInParent, PropertyName, Property) error
+// ForImplxxxx(Depth, IndexInParent, PropertyName, Property) error
+// ForAssignxxxx(Depth, IndexInParent, PropertyName, Property) error
 // ForKind:
-//   normal kinds: ForKindYYYY(IndexInParent, PropertyName, Property) error,
+//   normal kinds: ForKindYYYY(Depth, IndexInParent, PropertyName, Property) error,
 //   	YYYY must be a key in _kindMap, and the Kind must not be a container.
 //   container kinds:
-//   	ForContainerYYYY(IndexInParent, Size, StartOrEnd, PropertyName, Property) (goin bool, err error),
+//   	ForContainerYYYY(Depth, IndexInParent, Size, StartOrEnd, PropertyName, Property) (goin bool, err error),
 //   	YYYY must be a key in _containers
 func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 	if !method.Func.IsValid() {
@@ -191,10 +196,10 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 	paramSize := ftype.NumIn()
 	switch i {
 	case ForImpl, ForAssign, ForKind:
-		if paramSize != 4 {
+		if paramSize != i.ParamLength()+1 {
 			return false
 		}
-		if ftype.In(1) != _typeOfInt || ftype.In(2) != _typeOfString {
+		if ftype.In(1) != _typeOfInt || ftype.In(2) != _typeOfInt || ftype.In(3) != _typeOfString {
 			return false
 		}
 		if ftype.NumOut() != 1 || ftype.Out(0) != _typeOfError {
@@ -202,11 +207,11 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 		}
 		return true
 	case ForContainer:
-		if paramSize != 6 {
+		if paramSize != i.ParamLength()+1 {
 			return false
 		}
-		if ftype.In(1) != _typeOfInt || ftype.In(2) != _typeOfInt ||
-			ftype.In(3) != _typeOfBool || ftype.In(4) != _typeOfString {
+		if ftype.In(1) != _typeOfInt || ftype.In(2) != _typeOfInt || ftype.In(3) != _typeOfInt ||
+			ftype.In(4) != _typeOfBool || ftype.In(5) != _typeOfString {
 			return false
 		}
 		if ftype.NumOut() != 2 || ftype.Out(0) != _typeOfBool || ftype.Out(1) != _typeOfError {
@@ -215,6 +220,17 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (i ItemType) ParamLength() int {
+	switch i {
+	case ForImpl, ForAssign, ForKind:
+		return 4
+	case ForContainer:
+		return 6
+	default:
+		return 0
 	}
 }
 
@@ -365,6 +381,8 @@ func (c *TraverseConf) Clone() *TraverseConf {
 	return &TraverseConf{
 		IgnoreMissedBinding: c.IgnoreMissedBinding,
 		Propertier:          c.Propertier,
+		ContainerEnd:        c.ContainerEnd,
+		PtrAutoGoIn:         c.PtrAutoGoIn,
 	}
 }
 
@@ -388,43 +406,47 @@ func (p *parentInfo) isValid() bool {
 }
 
 func (p *parentInfo) callIns(val reflect.Value) []reflect.Value {
-	ret := make([]reflect.Value, 3)
+	ret := make([]reflect.Value, 4)
 	if p != nil && p.value.IsValid() {
+		ret[0] = reflect.ValueOf(p.depth)
 		if len(p.structFields) > 0 && p.offset >= 0 && p.offset < len(p.structFields) {
 			if p.structFields[p.offset].IndexForReal >= 0 {
-				ret[0] = reflect.ValueOf(p.structFields[p.offset].IndexForReal)
+				ret[1] = reflect.ValueOf(p.structFields[p.offset].IndexForReal)
 			} else {
-				ret[0] = reflect.ValueOf(p.structFields[p.offset].Index)
+				ret[1] = reflect.ValueOf(p.structFields[p.offset].Index)
 			}
-			ret[1] = reflect.ValueOf(p.structFields[p.offset].Name)
+			ret[2] = reflect.ValueOf(p.structFields[p.offset].Name)
 		} else {
-			ret[0] = reflect.ValueOf(p.offset)
-			ret[1] = reflect.ValueOf("")
+			ret[1] = reflect.ValueOf(p.offset)
+			ret[2] = reflect.ValueOf("")
 		}
 	} else {
-		ret[0] = reflect.ValueOf(int(-1))
-		ret[1] = reflect.ValueOf("")
+		ret[0] = reflect.ValueOf(0)
+		ret[1] = reflect.ValueOf(int(-1))
+		ret[2] = reflect.ValueOf("")
 	}
-	ret[2] = val
+	ret[3] = val
 	return ret
 }
 
 func (p *parentInfo) _containerIns(info *parentInfo, startOrEnd bool, val reflect.Value) []reflect.Value {
-	ret := make([]reflect.Value, 5)
+	ret := make([]reflect.Value, 6)
 	if p != nil && p.value.IsValid() {
-		ret[0] = reflect.ValueOf(p.offset)
+		ret[0] = reflect.ValueOf(p.depth)
+		ret[1] = reflect.ValueOf(p.offset)
 		if len(p.structFields) > 0 && p.offset >= 0 && p.offset < len(p.structFields) {
-			ret[3] = reflect.ValueOf(p.structFields[p.offset].Name)
+			ret[4] = reflect.ValueOf(p.structFields[p.offset].Name)
 		} else {
-			ret[3] = reflect.ValueOf("")
+			ret[4] = reflect.ValueOf("")
 		}
 	} else {
-		ret[0] = reflect.ValueOf(int(-1))
-		ret[3] = reflect.ValueOf("")
+		ret[0] = reflect.ValueOf(0)
+		ret[1] = reflect.ValueOf(int(-1))
+		ret[4] = reflect.ValueOf("")
 	}
-	ret[1] = reflect.ValueOf(info.size)
-	ret[2] = reflect.ValueOf(startOrEnd)
-	ret[4] = val
+	ret[2] = reflect.ValueOf(info.size)
+	ret[3] = reflect.ValueOf(startOrEnd)
+	ret[5] = val
 	return ret
 }
 
@@ -434,4 +456,11 @@ func (p *parentInfo) startContainerIns(info *parentInfo, val reflect.Value) []re
 
 func (p *parentInfo) endContainerIns(info *parentInfo, val reflect.Value) []reflect.Value {
 	return p._containerIns(info, false, val)
+}
+
+func (p *parentInfo) nextDepth() int {
+	if p == nil {
+		return 1
+	}
+	return p.depth + 1
 }
