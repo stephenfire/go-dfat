@@ -28,6 +28,7 @@ import (
 type Traveller struct {
 	adapter         reflect.Value
 	conf            *TraverseConf
+	nilPtrMethod    reflect.Value                  // nilPtrMethod.IsValid means has a ForNilPtr binding function
 	typeMethods     map[reflect.Type]reflect.Value // type -> method
 	kindMethods     map[reflect.Kind]reflect.Value // kind -> method
 	typeOrder       orderItems                     // all type list in order (tag order or declare order)
@@ -41,6 +42,7 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 	}
 	aptType := aptVal.Type()
 	var items orderItems
+	var nilPtrMethod reflect.Value
 	typeMethods := make(map[reflect.Type]reflect.Value)
 	kindMethods := make(map[reflect.Kind]reflect.Value)
 	for i := 0; i < aptType.NumMethod(); i++ {
@@ -81,6 +83,11 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 				k: inKind,
 			})
 			kindMethods[inKind] = aptVal.Method(i)
+		case ForNilPtr:
+			if nilPtrMethod.IsValid() {
+				return nil, fmt.Errorf("duplicated binding function %s found for Nil Ptr", m.Name)
+			}
+			nilPtrMethod = aptVal.Method(i)
 		}
 	}
 	if len(items) == 0 {
@@ -92,11 +99,12 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 		conf = config[0].Clone()
 	}
 	return &Traveller{
-		adapter:     aptVal,
-		conf:        conf,
-		typeMethods: typeMethods,
-		kindMethods: kindMethods,
-		typeOrder:   items,
+		adapter:      aptVal,
+		conf:         conf,
+		nilPtrMethod: nilPtrMethod,
+		typeMethods:  typeMethods,
+		kindMethods:  kindMethods,
+		typeOrder:    items,
 	}, nil
 }
 
@@ -111,6 +119,10 @@ func (t *Traveller) String() string {
 		typ := t.adapter.Type()
 		adapterStr = fmt.Sprintf("adapter:%s", typ.Name())
 	}
+	if t.nilPtrMethod.IsValid() {
+		return fmt.Sprintf("Traveller{%s NilPtr Types:%d Kinds:%d Items:%s}",
+			adapterStr, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
+	}
 	return fmt.Sprintf("Traveller{%s Types:%d Kinds:%d Items:%s}",
 		adapterStr, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
 }
@@ -119,8 +131,13 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter 
 	if !val.IsValid() {
 		return false, false, nil, reflect.Value{}, errors.New("invalid value")
 	}
+	if t.nilPtrMethod.IsValid() && val.Type().Kind() == reflect.Ptr && val.IsNil() {
+		outs := t.nilPtrMethod.Call(parent.callIns(val))
+		_, err = ForNilPtr.parseReturns(outs)
+		return false, false, nil, reflect.Value{}, err
+	}
 	for i, item := range t.typeOrder {
-		typ, kind, match := item.match(val.Type())
+		itype, typ, kind, match := item.match(val)
 		if !match {
 			continue
 		}
@@ -172,7 +189,7 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter 
 		} else {
 			panic(fmt.Errorf("SHOULD NOT BE HERE!! matching %d item %s, Kind:%s", i, item, kind.String()))
 		}
-		goin, err = item.parseReturns(outs)
+		goin, err = itype.parseReturns(outs)
 		if err != nil {
 			return false, false, nil, reflect.Value{}, err
 		}
@@ -298,7 +315,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 	}
 	if t.conf != nil && t.conf.ContainerEnd {
 		outs := next.binding.Call(parent.endContainerIns(next, oldVal))
-		_, err = orderItem{c: true}.parseReturns(outs)
+		_, err = ForContainer.parseReturns(outs)
 		if err != nil {
 			return fmt.Errorf("call container end failed: %v", err)
 		}

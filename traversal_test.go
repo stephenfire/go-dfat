@@ -27,13 +27,12 @@ import (
 )
 
 type Inner0 struct {
-	A int `rtlorder:"0"`
-	E int `rtlorder:"5"`
-	B int `rtlorder:"1"`
-	C int `rtlorder:"3"`
-	D int `rtlorder:"4"`
-	x int
-	y int
+	A int  `rtlorder:"0"`
+	E int  `rtlorder:"5"`
+	B int  `rtlorder:"1"`
+	C int  `rtlorder:"3"`
+	D int  `rtlorder:"4"`
+	Z *int `rtlorder:"6""`
 }
 
 type parser0 struct{}
@@ -54,9 +53,18 @@ type parser1 struct {
 }
 
 func (p parser1) ForContainerPtr(depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
-	fmt.Printf("ForKindPtr(depth:%d index:%d size:%d start:%t name:%s property:%s)\n",
+	fmt.Printf("ForContainerPtr(depth:%d index:%d size:%d start:%t name:%s property:%s)\n",
 		depth, indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
 	return true, nil
+}
+
+type parser2 struct {
+	parser0
+}
+
+func (p parser2) ForNilPtr(depth, indexOfParent int, name string, property interface{}) error {
+	fmt.Printf("ForNilPtr(Depth:%d Index:%d name:%s prop:%s)\n", depth, indexOfParent, name, reflect.TypeOf(property))
+	return nil
 }
 
 type rtlpropertier struct{}
@@ -133,8 +141,6 @@ func TestStruct(t *testing.T) {
 		B: 3,
 		C: 4,
 		D: 5,
-		x: 6,
-		y: 7,
 	}
 	var i1 *Inner0
 
@@ -157,6 +163,22 @@ func TestStruct(t *testing.T) {
 	{
 		t.Log("parser1")
 		p := parser1{}
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true, ContainerEnd: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = tr.Traverse(i); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Log("nil")
+		if err = tr.Traverse(i1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	{
+		t.Log("parser2")
+		p := parser2{}
 		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
 		if err != nil {
 			t.Fatal(err)
@@ -179,11 +201,9 @@ func TestWithSelfParser(t *testing.T) {
 		B: 3,
 		C: 4,
 		D: 5,
-		x: 6,
-		y: 7,
 	}
-	p := parser0{}
-	tr, err := NewTraveller(p, &TraverseConf{Propertier: rtlpropertier{}, PtrAutoGoIn: true})
+	p := parser1{}
+	tr, err := NewTraveller(p, &TraverseConf{Propertier: rtlpropertier{}, PtrAutoGoIn: true, ContainerEnd: true})
 	if err != nil {
 		t.Fatal(err)
 	}

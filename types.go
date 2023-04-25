@@ -65,10 +65,11 @@ var (
 		reflect.Struct: {},
 	}
 
-	_typeOfString = reflect.TypeOf((*string)(nil)).Elem()
-	_typeOfBool   = reflect.TypeOf(true)
-	_typeOfInt    = reflect.TypeOf(int(0))
-	_typeOfError  = reflect.TypeOf((*error)(nil)).Elem()
+	_typeOfString    = reflect.TypeOf((*string)(nil)).Elem()
+	_typeOfBool      = reflect.TypeOf(true)
+	_typeOfInt       = reflect.TypeOf(int(0))
+	_typeOfError     = reflect.TypeOf((*error)(nil)).Elem()
+	_typeOfInterface = reflect.TypeOf((*interface{})(nil)).Elem()
 )
 
 const (
@@ -76,12 +77,14 @@ const (
 	ForAssign    ItemType = 1
 	ForKind      ItemType = 2
 	ForContainer ItemType = 3
+	ForNilPtr    ItemType = 4
 	Unknown      ItemType = 0xff
 
 	ImplPrefix       = "ForImpl"
 	AssignPrefix     = "ForAssign"
 	KindPrefix       = "ForKind"
 	ContainerPrefix  = "ForContainer"
+	NilPtrName       = "ForNilPtr"
 	_minPrefixLength = 7
 )
 
@@ -94,8 +97,10 @@ const (
 // 针对Kind的方法：由方法名前缀、方法名及Tag标识确定绑定关系, ForKindxxxxx
 // 首先确定当前属性是否实现绑定的interface
 // 再根据遍历中当前属性的类型找到对应方法:
-//		与方法声明类型完全一致时，则直接使用
-//		如果属性类型可以AssignableTo，则找出其中序号最靠前的 ()
+//
+//	与方法声明类型完全一致时，则直接使用
+//	如果属性类型可以AssignableTo，则找出其中序号最靠前的 ()
+//
 // 如果没有，则用类型对应的Kind找方法。
 // 如果都没有，则忽略
 type (
@@ -149,7 +154,9 @@ func (ItemType) Which(name string) (ItemType, reflect.Kind, bool) {
 	if len(name) < _minPrefixLength {
 		return Unknown, reflect.Invalid, false
 	}
-	if name[:len(ImplPrefix)] == ImplPrefix {
+	if name == NilPtrName {
+		return ForNilPtr, reflect.Invalid, true
+	} else if name[:len(ImplPrefix)] == ImplPrefix {
 		return ForImpl, reflect.Invalid, true
 	} else if len(name) >= len(AssignPrefix) && name[:len(AssignPrefix)] == AssignPrefix {
 		return ForAssign, reflect.Invalid, true
@@ -182,12 +189,14 @@ func (ItemType) Which(name string) (ItemType, reflect.Kind, bool) {
 // binding function signatures:
 // ForImplxxxx(Depth, IndexInParent, PropertyName, Property) error
 // ForAssignxxxx(Depth, IndexInParent, PropertyName, Property) error
+// ForNilPtr(Depth, IndexInParent, PropertyName, Property) error
 // ForKind:
-//   normal kinds: ForKindYYYY(Depth, IndexInParent, PropertyName, Property) error,
-//   	YYYY must be a key in _kindMap, and the Kind must not be a container.
-//   container kinds:
-//   	ForContainerYYYY(Depth, IndexInParent, Size, StartOrEnd, PropertyName, Property) (goin bool, err error),
-//   	YYYY must be a key in _containers
+//
+//	normal kinds: ForKindYYYY(Depth, IndexInParent, PropertyName, Property) error,
+//		YYYY must be a key in _kindMap, and the Kind must not be a container.
+//	container kinds:
+//		ForContainerYYYY(Depth, IndexInParent, Size, StartOrEnd, PropertyName, Property) (goin bool, err error),
+//		YYYY must be a key in _containers
 func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 	if !method.Func.IsValid() {
 		return false
@@ -195,7 +204,7 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 	ftype := method.Func.Type()
 	paramSize := ftype.NumIn()
 	switch i {
-	case ForImpl, ForAssign, ForKind:
+	case ForImpl, ForAssign, ForKind, ForNilPtr:
 		if paramSize != i.ParamLength()+1 {
 			return false
 		}
@@ -203,6 +212,9 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 			return false
 		}
 		if ftype.NumOut() != 1 || ftype.Out(0) != _typeOfError {
+			return false
+		}
+		if i == ForNilPtr && ftype.In(4) != _typeOfInterface {
 			return false
 		}
 		return true
@@ -223,9 +235,38 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 	}
 }
 
+func (i ItemType) parseReturns(outs []reflect.Value) (goin bool, err error) {
+	switch i {
+	case ForImpl, ForAssign, ForKind, ForNilPtr:
+		if len(outs) != 1 {
+			return false, ErrWant1Return
+		}
+		if !outs[0].Type().Implements(_typeOfError) {
+			return false, ErrWant1Return
+		}
+		if !outs[0].IsZero() {
+			err = outs[0].Interface().(error)
+		}
+		return false, err
+	case ForContainer:
+		if len(outs) != 2 {
+			return false, ErrWant2Returns
+		}
+		if outs[0].Kind() != reflect.Bool || !outs[1].Type().Implements(_typeOfError) {
+			return false, ErrWant2Returns
+		}
+		if !outs[1].IsZero() {
+			err = outs[1].Interface().(error)
+		}
+		return outs[0].Bool(), err
+	default:
+		return false, errors.New("unknown item type")
+	}
+}
+
 func (i ItemType) ParamLength() int {
 	switch i {
-	case ForImpl, ForAssign, ForKind:
+	case ForImpl, ForAssign, ForKind, ForNilPtr:
 		return 4
 	case ForContainer:
 		return 6
@@ -244,6 +285,8 @@ func (i ItemType) String() string {
 		return KindPrefix
 	case ForContainer:
 		return ContainerPrefix
+	case ForNilPtr:
+		return NilPtrName
 	case Unknown:
 		return "Unknown"
 	default:
@@ -266,56 +309,37 @@ func (i orderItem) Type() (ItemType, bool) {
 	return Unknown, false
 }
 
-func (i orderItem) match(typ reflect.Type) (reflect.Type, reflect.Kind, bool) {
+func (i orderItem) match(val reflect.Value) (ItemType, reflect.Type, reflect.Kind, bool) {
+	if !val.IsValid() {
+		return Unknown, nil, reflect.Invalid, false
+	}
+	typ := val.Type()
 	if typ == nil {
-		return nil, reflect.Invalid, false
+		return Unknown, nil, reflect.Invalid, false
 	}
 	if i.t != nil {
 		if i.t.Kind() == reflect.Interface {
 			if typ.Implements(i.t) {
-				return i.t, reflect.Invalid, true
+				return ForImpl, i.t, reflect.Invalid, true
 			} else {
-				return nil, reflect.Invalid, false
+				return Unknown, nil, reflect.Invalid, false
 			}
 		} else {
 			if typ.AssignableTo(i.t) {
-				return i.t, reflect.Invalid, true
+				return ForAssign, i.t, reflect.Invalid, true
 			} else {
-				return nil, reflect.Invalid, false
+				return Unknown, nil, reflect.Invalid, false
 			}
 		}
 	} else {
 		if typ.Kind() == i.k {
-			return nil, i.k, true
+			if _, is := _containers[i.k]; is {
+				return ForContainer, nil, i.k, true
+			}
+			return ForKind, nil, i.k, true
 		} else {
-			return nil, reflect.Invalid, false
+			return Unknown, nil, reflect.Invalid, false
 		}
-	}
-}
-
-func (i orderItem) parseReturns(outs []reflect.Value) (goin bool, err error) {
-	if i.c {
-		if len(outs) != 2 {
-			return false, ErrWant2Returns
-		}
-		if outs[0].Kind() != reflect.Bool || !outs[1].Type().Implements(_typeOfError) {
-			return false, ErrWant2Returns
-		}
-		if !outs[1].IsZero() {
-			err = outs[1].Interface().(error)
-		}
-		return outs[0].Bool(), err
-	} else {
-		if len(outs) != 1 {
-			return false, ErrWant1Return
-		}
-		if !outs[0].Type().Implements(_typeOfError) {
-			return false, ErrWant1Return
-		}
-		if !outs[0].IsZero() {
-			err = outs[0].Interface().(error)
-		}
-		return false, err
 	}
 }
 
