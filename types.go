@@ -185,7 +185,7 @@ func (ItemType) Which(name string) (ItemType, reflect.Kind, bool) {
 	}
 }
 
-// IsValidWithReceiver
+// IsValidWithReceiver with receiver object in the first place
 // binding function signatures:
 // ForImplxxxx(Depth, IndexInParent, PropertyName, Property) error
 // ForAssignxxxx(Depth, IndexInParent, PropertyName, Property) error
