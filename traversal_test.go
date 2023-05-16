@@ -18,6 +18,7 @@
 package dfpt
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"sort"
@@ -32,17 +33,17 @@ type Inner0 struct {
 	B int  `rtlorder:"1"`
 	C int  `rtlorder:"3"`
 	D int  `rtlorder:"4"`
-	Z *int `rtlorder:"6""`
+	Z *int `rtlorder:"6"`
 }
 
 type parser0 struct{}
 
-func (p parser0) ForAssign0(depth, indexOfParent int, name string, property int) error {
+func (p parser0) ForAssign0(_ *TravContext, depth, indexOfParent int, name string, property int) error {
 	fmt.Printf("ForAssign0(Depth:%d Index:%d name:%s prop:%d)\n", depth, indexOfParent, name, property)
 	return nil
 }
 
-func (p parser0) ForContainerStruct(depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
+func (p parser0) ForContainerStruct(_ *TravContext, depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
 	fmt.Printf("ForContainerStruct(depth:%d index:%d size:%d start:%t name:%s property:%s)\n",
 		depth, indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
 	return true, nil
@@ -52,7 +53,7 @@ type parser1 struct {
 	parser0
 }
 
-func (p parser1) ForContainerPtr(depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
+func (p parser1) ForContainerPtr(_ *TravContext, depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
 	fmt.Printf("ForContainerPtr(depth:%d index:%d size:%d start:%t name:%s property:%s)\n",
 		depth, indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
 	return true, nil
@@ -62,8 +63,17 @@ type parser2 struct {
 	parser0
 }
 
-func (p parser2) ForNilPtr(depth, indexOfParent int, name string, property interface{}) error {
+func (p parser2) ForNilPtr(_ *TravContext, depth, indexOfParent int, name string, property interface{}) error {
 	fmt.Printf("ForNilPtr(Depth:%d Index:%d name:%s prop:%s)\n", depth, indexOfParent, name, reflect.TypeOf(property))
+	return nil
+}
+
+type parser3 struct {
+	parser0
+}
+
+func (p parser3) ForIntX(_ *TravContext, depth, indexOfParent int, name string, property interface{}) error {
+	fmt.Printf("ForIntX(Depth:%d Index:%d name:%s prop:%s)\n", depth, indexOfParent, name, reflect.TypeOf(property))
 	return nil
 }
 
@@ -144,6 +154,7 @@ func TestStruct(t *testing.T) {
 	}
 	var i1 *Inner0
 
+	ctx := NewContext()
 	{
 		t.Log("parser0")
 		p := parser0{}
@@ -151,12 +162,13 @@ func TestStruct(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = tr.Traverse(i); err != nil {
+		t.Log(tr)
+		if err = tr.Traverse(ctx, i); err != nil {
 			t.Fatal(err)
 		}
 
 		t.Log("nil")
-		if err = tr.Traverse(i1); err != nil {
+		if err = tr.Traverse(ctx, i1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -167,12 +179,13 @@ func TestStruct(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = tr.Traverse(i); err != nil {
+		t.Log(tr)
+		if err = tr.Traverse(ctx, i); err != nil {
 			t.Fatal(err)
 		}
 
 		t.Log("nil")
-		if err = tr.Traverse(i1); err != nil {
+		if err = tr.Traverse(ctx, i1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -183,12 +196,30 @@ func TestStruct(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = tr.Traverse(i); err != nil {
+		t.Log(tr)
+		if err = tr.Traverse(ctx, i); err != nil {
 			t.Fatal(err)
 		}
 
 		t.Log("nil")
-		if err = tr.Traverse(i1); err != nil {
+		if err = tr.Traverse(ctx, i1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	{
+		t.Log("parser3")
+		p := parser3{}
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Log(tr)
+		if err = tr.Traverse(ctx, i); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Log("nil")
+		if err = tr.Traverse(ctx, i1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -207,7 +238,81 @@ func TestWithSelfParser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = tr.Traverse(i); err != nil {
+	if err = tr.Traverse(NewContext(), i); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type (
+	bufContext TravContext
+	wParser    struct{}
+)
+
+func (b *bufContext) getBuffer() *bytes.Buffer {
+	v, ok := (*TravContext)(b).GetLocal("buffer")
+	if !ok {
+		return nil
+	}
+	return v.(*bytes.Buffer)
+}
+
+func (b *bufContext) getPrefix() string {
+	v, ok := (*TravContext)(b).GetLocal("prefix")
+	if !ok {
+		return ""
+	}
+	return v.(string)
+}
+
+var (
+	_type_of_byte = reflect.TypeOf(byte(0))
+)
+
+func (w wParser) _slices(ctx *TravContext, depth, indexOfParent, size int, name string,
+	val reflect.Value) (bool, error) {
+	if val.Type().Elem() != _type_of_byte {
+		return true, nil
+	}
+	buf := (*bufContext)(ctx).getBuffer()
+	prefix := (*bufContext)(ctx).getPrefix()
+	if len(prefix) > 0 {
+		buf.WriteString(prefix)
+	}
+	if depth > 0 {
+		buf.WriteString(strings.Repeat("\t", int(depth)))
+	}
+	if val.Len() == 0 {
+		buf.WriteString(fmt.Sprintf("%d/%d-%s:", indexOfParent, size, name))
+	} else {
+		buf.WriteString(fmt.Sprintf("%d/%d-%s: %x", indexOfParent, size, name, val.Slice(0, val.Len())))
+	}
+	return false, nil
+}
+
+func (w wParser) ForContainerArray(ctx *TravContext, depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (bool, error) {
+	if startOrEnd {
+		return w._slices(ctx, depth, indexOfParent, size, name, reflect.ValueOf(property))
+	}
+	return false, nil
+}
+
+func (w wParser) ForContainerSlice(ctx *TravContext, depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (bool, error) {
+	if startOrEnd {
+		return w._slices(ctx, depth, indexOfParent, size, name, reflect.ValueOf(property))
+	}
+	return false, nil
+}
+
+func TestIntAssign(t *testing.T) {
+	type int16th int16
+	type inth int
+	typeOfint64 := reflect.TypeOf(int64(0))
+	t.Log(reflect.TypeOf(int(0)).AssignableTo(typeOfint64),
+		reflect.TypeOf(int8(0)).AssignableTo(typeOfint64),
+		reflect.TypeOf(int16(0)).AssignableTo(typeOfint64),
+		reflect.TypeOf(int32(0)).AssignableTo(typeOfint64),
+		reflect.TypeOf(int64(0)).AssignableTo(typeOfint64),
+		reflect.TypeOf(inth(0)).AssignableTo(typeOfint64),
+		reflect.TypeOf(int16th(0)).AssignableTo(typeOfint64),
+	)
 }

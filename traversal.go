@@ -28,7 +28,7 @@ import (
 type Traveller struct {
 	adapter         reflect.Value
 	conf            *TraverseConf
-	nilPtrMethod    reflect.Value                  // nilPtrMethod.IsValid means has a ForNilPtr binding function
+	shortcuts       map[ItemType]reflect.Value     // ForNilPtr/ForIntX/ForUintX -> binding methods
 	typeMethods     map[reflect.Type]reflect.Value // type -> method
 	kindMethods     map[reflect.Kind]reflect.Value // kind -> method
 	typeOrder       orderItems                     // all type list in order (tag order or declare order)
@@ -42,7 +42,7 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 	}
 	aptType := aptVal.Type()
 	var items orderItems
-	var nilPtrMethod reflect.Value
+	shortcuts := make(map[ItemType]reflect.Value)
 	typeMethods := make(map[reflect.Type]reflect.Value)
 	kindMethods := make(map[reflect.Kind]reflect.Value)
 	for i := 0; i < aptType.NumMethod(); i++ {
@@ -83,11 +83,11 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 				k: inKind,
 			})
 			kindMethods[inKind] = aptVal.Method(i)
-		case ForNilPtr:
-			if nilPtrMethod.IsValid() {
-				return nil, fmt.Errorf("duplicated binding function %s found for Nil Ptr", m.Name)
+		case ForNilPtr, ForIntX, ForUintX:
+			if _, exist := shortcuts[itype]; exist {
+				return nil, fmt.Errorf("duplicated binding function %s found", m.Name)
 			}
-			nilPtrMethod = aptVal.Method(i)
+			shortcuts[itype] = aptVal.Method(i)
 		}
 	}
 	if len(items) == 0 {
@@ -99,12 +99,12 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 		conf = config[0].Clone()
 	}
 	return &Traveller{
-		adapter:      aptVal,
-		conf:         conf,
-		nilPtrMethod: nilPtrMethod,
-		typeMethods:  typeMethods,
-		kindMethods:  kindMethods,
-		typeOrder:    items,
+		adapter:     aptVal,
+		conf:        conf,
+		shortcuts:   shortcuts,
+		typeMethods: typeMethods,
+		kindMethods: kindMethods,
+		typeOrder:   items,
 	}, nil
 }
 
@@ -119,23 +119,36 @@ func (t *Traveller) String() string {
 		typ := t.adapter.Type()
 		adapterStr = fmt.Sprintf("adapter:%s", typ.Name())
 	}
-	if t.nilPtrMethod.IsValid() {
-		return fmt.Sprintf("Traveller{%s NilPtr Types:%d Kinds:%d Items:%s}",
-			adapterStr, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
+	var keys []ItemType
+	for k := range t.shortcuts {
+		keys = append(keys, k)
 	}
-	return fmt.Sprintf("Traveller{%s Types:%d Kinds:%d Items:%s}",
-		adapterStr, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
+	sort.Slice(keys, func(i, j int) bool {
+		return int(keys[i]) < int(keys[j])
+	})
+	var keystrings []string
+	for _, k := range keys {
+		keystrings = append(keystrings, k.String())
+	}
+	return fmt.Sprintf("Traveller{%s Shortcuts:%s Types:%d Kinds:%d Items:%s}",
+		adapterStr, keystrings, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
 }
 
-func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter bool, info *parentInfo, newVal reflect.Value, err error) {
+func (t *Traveller) _call(ctx *TravContext, parent *parentInfo, val reflect.Value) (goin, reEnter bool,
+	info *parentInfo, newVal reflect.Value, err error) {
 	if !val.IsValid() {
 		return false, false, nil, reflect.Value{}, errors.New("invalid value")
 	}
-	if t.nilPtrMethod.IsValid() && val.Type().Kind() == reflect.Ptr && val.IsNil() {
-		outs := t.nilPtrMethod.Call(parent.callIns(val))
-		_, err = ForNilPtr.parseReturns(outs)
-		return false, false, nil, reflect.Value{}, err
+
+	// shortcuts
+	for itype, method := range t.shortcuts {
+		if itype.MatchValue(val) {
+			outs := method.Call(parent.callIns(ctx, val))
+			_, err = ForNilPtr.parseReturns(outs)
+			return false, false, nil, reflect.Value{}, err
+		}
 	}
+
 	for i, item := range t.typeOrder {
 		itype, typ, kind, match := item.match(val)
 		if !match {
@@ -147,7 +160,7 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter 
 			if !ok || !fVal.IsValid() {
 				panic(fmt.Errorf("matching %d item %s, but function not found by Type:%s", i, item, typ.Name()))
 			}
-			outs = fVal.Call(parent.callIns(val))
+			outs = fVal.Call(parent.callIns(ctx, val))
 		} else if kind != reflect.Invalid {
 			fVal, ok := t.kindMethods[kind]
 			if !ok || !fVal.IsValid() {
@@ -182,9 +195,9 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter 
 					structFields: fields,
 					binding:      fVal,
 				}
-				outs = fVal.Call(parent.startContainerIns(info, val))
+				outs = fVal.Call(parent.startContainerIns(ctx, info, val))
 			} else {
-				outs = fVal.Call(parent.callIns(val))
+				outs = fVal.Call(parent.callIns(ctx, val))
 			}
 		} else {
 			panic(fmt.Errorf("SHOULD NOT BE HERE!! matching %d item %s, Kind:%s", i, item, kind.String()))
@@ -195,7 +208,9 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter 
 		}
 		return goin, false, info, reflect.Value{}, nil
 	}
+	// no callback for specific value type
 	if t.conf != nil && t.conf.PtrAutoGoIn {
+		// no callback for Ptr
 		if val.Type().Kind() == reflect.Ptr {
 			if val.IsNil() == false {
 				newVal = val.Elem()
@@ -205,6 +220,7 @@ func (t *Traveller) _call(parent *parentInfo, val reflect.Value) (goin, reEnter 
 			}
 		}
 	}
+	// emit error if there's no flag for ignoring
 	if t.conf == nil || !t.conf.IgnoreMissedBinding {
 		return false, false, nil, reflect.Value{},
 			fmt.Errorf("type:%s kind:%s binding is missing", val.Type(), val.Type().Kind())
@@ -233,7 +249,7 @@ func (t *Traveller) _structProperties(val reflect.Value) (int, []Property) {
 	return len(ps), ps
 }
 
-func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
+func (t *Traveller) _traverse(ctx *TravContext, parent *parentInfo, val reflect.Value) error {
 	if !val.IsValid() {
 		return fmt.Errorf("invalid value in _traverse(parent:%s, val:%s)", parent, val.String())
 	}
@@ -243,7 +259,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 	oldVal := val
 	var newVal reflect.Value
 	for {
-		goin, reEnter, next, newVal, err = t._call(parent, oldVal)
+		goin, reEnter, next, newVal, err = t._call(ctx, parent, oldVal)
 		if err != nil {
 			return err
 		}
@@ -267,7 +283,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 		for i := 0; i < next.size; i++ {
 			child := oldVal.Index(i)
 			next.offset = i
-			if err = t._traverse(next, child); err != nil {
+			if err = t._traverse(ctx, next, child); err != nil {
 				return err
 			}
 		}
@@ -280,12 +296,12 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 			for i := 0; i < len(keys); i++ {
 				// stack value for map: idx%2==0 is the key of map, idx%2==1 is the value of map
 				next.offset = i << 1
-				if err = t._traverse(next, keys[i]); err != nil {
+				if err = t._traverse(ctx, next, keys[i]); err != nil {
 					return err
 				}
 				value := oldVal.MapIndex(keys[i])
 				next.offset = i<<1 + 1
-				if err = t._traverse(next, value); err != nil {
+				if err = t._traverse(ctx, next, value); err != nil {
 					return err
 				}
 			}
@@ -298,7 +314,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 			}
 			fieldVal := oldVal.Field(field.Index)
 			next.offset = i
-			if err = t._traverse(next, fieldVal); err != nil {
+			if err = t._traverse(ctx, next, fieldVal); err != nil {
 				return err
 			}
 		}
@@ -306,7 +322,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 		if next.size > 0 {
 			elem := oldVal.Elem()
 			next.offset = 0
-			if err = t._traverse(next, elem); err != nil {
+			if err = t._traverse(ctx, next, elem); err != nil {
 				return err
 			}
 		}
@@ -314,7 +330,7 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 		panic("unknown status")
 	}
 	if t.conf != nil && t.conf.ContainerEnd {
-		outs := next.binding.Call(parent.endContainerIns(next, oldVal))
+		outs := next.binding.Call(parent.endContainerIns(ctx, next, oldVal))
 		_, err = ForContainer.parseReturns(outs)
 		if err != nil {
 			return fmt.Errorf("call container end failed: %v", err)
@@ -323,10 +339,10 @@ func (t *Traveller) _traverse(parent *parentInfo, val reflect.Value) error {
 	return nil
 }
 
-func (t *Traveller) Traverse(obj interface{}) error {
+func (t *Traveller) Traverse(ctx *TravContext, obj interface{}) error {
 	val := reflect.ValueOf(obj)
 	if !val.IsValid() {
 		return nil
 	}
-	return t._traverse(nil, val)
+	return t._traverse(ctx, nil, val)
 }

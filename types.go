@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 )
 
 var (
@@ -65,11 +66,12 @@ var (
 		reflect.Struct: {},
 	}
 
-	_typeOfString    = reflect.TypeOf((*string)(nil)).Elem()
-	_typeOfBool      = reflect.TypeOf(true)
-	_typeOfInt       = reflect.TypeOf(int(0))
-	_typeOfError     = reflect.TypeOf((*error)(nil)).Elem()
-	_typeOfInterface = reflect.TypeOf((*interface{})(nil)).Elem()
+	_typeOfString     = reflect.TypeOf((*string)(nil)).Elem()
+	_typeOfBool       = reflect.TypeOf(true)
+	_typeOfInt        = reflect.TypeOf(int(0))
+	_typeOfError      = reflect.TypeOf((*error)(nil)).Elem()
+	_typeOfInterface  = reflect.TypeOf((*interface{})(nil)).Elem()
+	_typeOfTravCtxPtr = reflect.TypeOf((*TravContext)(nil))
 )
 
 const (
@@ -78,6 +80,8 @@ const (
 	ForKind      ItemType = 2
 	ForContainer ItemType = 3
 	ForNilPtr    ItemType = 4
+	ForIntX      ItemType = 5 // for int/int8/int16/int32/int64
+	ForUintX     ItemType = 6 // for uint/uint8/uint16/uint32/uint64
 	Unknown      ItemType = 0xff
 
 	ImplPrefix       = "ForImpl"
@@ -85,6 +89,8 @@ const (
 	KindPrefix       = "ForKind"
 	ContainerPrefix  = "ForContainer"
 	NilPtrName       = "ForNilPtr"
+	IntXName         = "ForIntX"
+	UintXName        = "ForUintX"
 	_minPrefixLength = 7
 )
 
@@ -154,48 +160,78 @@ func (ItemType) Which(name string) (ItemType, reflect.Kind, bool) {
 	if len(name) < _minPrefixLength {
 		return Unknown, reflect.Invalid, false
 	}
-	if name == NilPtrName {
+	switch name {
+	case NilPtrName:
 		return ForNilPtr, reflect.Invalid, true
-	} else if name[:len(ImplPrefix)] == ImplPrefix {
-		return ForImpl, reflect.Invalid, true
-	} else if len(name) >= len(AssignPrefix) && name[:len(AssignPrefix)] == AssignPrefix {
-		return ForAssign, reflect.Invalid, true
-	} else if name[:len(KindPrefix)] == KindPrefix {
-		suffix := name[len(KindPrefix):]
-		kind, ok := _kindMap[suffix]
-		if !ok {
+	case IntXName:
+		return ForIntX, reflect.Invalid, true
+	case UintXName:
+		return ForUintX, reflect.Invalid, true
+	default:
+		if name[:len(ImplPrefix)] == ImplPrefix {
+			return ForImpl, reflect.Invalid, true
+		} else if len(name) >= len(AssignPrefix) && name[:len(AssignPrefix)] == AssignPrefix {
+			return ForAssign, reflect.Invalid, true
+		} else if name[:len(KindPrefix)] == KindPrefix {
+			suffix := name[len(KindPrefix):]
+			kind, ok := _kindMap[suffix]
+			if !ok {
+				return Unknown, reflect.Invalid, false
+			}
+			if _, ok = _containers[kind]; ok {
+				return Unknown, reflect.Invalid, false
+			}
+			return ForKind, kind, true
+		} else if name[:len(ContainerPrefix)] == ContainerPrefix {
+			suffix := name[len(ContainerPrefix):]
+			kind, ok := _kindMap[suffix]
+			if !ok {
+				return Unknown, reflect.Invalid, false
+			}
+			if _, ok = _containers[kind]; !ok {
+				return Unknown, reflect.Invalid, false
+			}
+			return ForContainer, kind, true
+		} else {
 			return Unknown, reflect.Invalid, false
 		}
-		if _, ok = _containers[kind]; ok {
-			return Unknown, reflect.Invalid, false
+	}
+}
+
+func (i ItemType) MatchValue(val reflect.Value) bool {
+	switch i {
+	case ForNilPtr:
+		return val.Type().Kind() == reflect.Ptr && val.IsNil()
+	case ForIntX:
+		switch val.Type().Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Uint32, reflect.Int64:
+			return true
 		}
-		return ForKind, kind, true
-	} else if name[:len(ContainerPrefix)] == ContainerPrefix {
-		suffix := name[len(ContainerPrefix):]
-		kind, ok := _kindMap[suffix]
-		if !ok {
-			return Unknown, reflect.Invalid, false
+		return false
+	case ForUintX:
+		switch val.Type().Kind() {
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return true
 		}
-		if _, ok = _containers[kind]; !ok {
-			return Unknown, reflect.Invalid, false
-		}
-		return ForContainer, kind, true
-	} else {
-		return Unknown, reflect.Invalid, false
+		return false
+	default:
+		return false
 	}
 }
 
 // IsValidWithReceiver with receiver object in the first place
 // binding function signatures:
-// ForImplxxxx(Depth, IndexInParent, PropertyName, Property) error
-// ForAssignxxxx(Depth, IndexInParent, PropertyName, Property) error
-// ForNilPtr(Depth, IndexInParent, PropertyName, Property) error
+// ForImplxxxx(*TravContext, Depth, IndexInParent, PropertyName, Property) error
+// ForAssignxxxx(*TravContext, Depth, IndexInParent, PropertyName, Property) error
+// ForNilPtr(*TravContext, Depth, IndexInParent, PropertyName, Property) error
+// ForIntX(*TravContext, Depth, IndexInParent, PropertyName, Property) error
+// ForUintX(*TravContext, Depth, IndexInParent, PropertyName, Property) error
 // ForKind:
 //
-//	normal kinds: ForKindYYYY(Depth, IndexInParent, PropertyName, Property) error,
+//	normal kinds: ForKindYYYY(*TravContext, Depth, IndexInParent, PropertyName, Property) error,
 //		YYYY must be a key in _kindMap, and the Kind must not be a container.
 //	container kinds:
-//		ForContainerYYYY(Depth, IndexInParent, Size, StartOrEnd, PropertyName, Property) (goin bool, err error),
+//		ForContainerYYYY(*TravContext, Depth, IndexInParent, Size, StartOrEnd, PropertyName, Property) (goin bool, err error),
 //		YYYY must be a key in _containers
 func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 	if !method.Func.IsValid() {
@@ -203,27 +239,26 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 	}
 	ftype := method.Func.Type()
 	paramSize := ftype.NumIn()
+	if paramSize != i.ParamLength()+1 {
+		return false
+	}
 	switch i {
-	case ForImpl, ForAssign, ForKind, ForNilPtr:
-		if paramSize != i.ParamLength()+1 {
-			return false
-		}
-		if ftype.In(1) != _typeOfInt || ftype.In(2) != _typeOfInt || ftype.In(3) != _typeOfString {
+	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX:
+		if ftype.In(1) != _typeOfTravCtxPtr || ftype.In(2) != _typeOfInt ||
+			ftype.In(3) != _typeOfInt || ftype.In(4) != _typeOfString {
 			return false
 		}
 		if ftype.NumOut() != 1 || ftype.Out(0) != _typeOfError {
 			return false
 		}
-		if i == ForNilPtr && ftype.In(4) != _typeOfInterface {
+		if i == ForNilPtr && ftype.In(5) != _typeOfInterface {
 			return false
 		}
 		return true
 	case ForContainer:
-		if paramSize != i.ParamLength()+1 {
-			return false
-		}
-		if ftype.In(1) != _typeOfInt || ftype.In(2) != _typeOfInt || ftype.In(3) != _typeOfInt ||
-			ftype.In(4) != _typeOfBool || ftype.In(5) != _typeOfString {
+		if ftype.In(1) != _typeOfTravCtxPtr || ftype.In(2) != _typeOfInt ||
+			ftype.In(3) != _typeOfInt || ftype.In(4) != _typeOfInt ||
+			ftype.In(5) != _typeOfBool || ftype.In(6) != _typeOfString {
 			return false
 		}
 		if ftype.NumOut() != 2 || ftype.Out(0) != _typeOfBool || ftype.Out(1) != _typeOfError {
@@ -237,7 +272,7 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 
 func (i ItemType) parseReturns(outs []reflect.Value) (goin bool, err error) {
 	switch i {
-	case ForImpl, ForAssign, ForKind, ForNilPtr:
+	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX:
 		if len(outs) != 1 {
 			return false, ErrWant1Return
 		}
@@ -266,10 +301,10 @@ func (i ItemType) parseReturns(outs []reflect.Value) (goin bool, err error) {
 
 func (i ItemType) ParamLength() int {
 	switch i {
-	case ForImpl, ForAssign, ForKind, ForNilPtr:
-		return 4
+	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX:
+		return 5
 	case ForContainer:
-		return 6
+		return 7
 	default:
 		return 0
 	}
@@ -287,6 +322,10 @@ func (i ItemType) String() string {
 		return ContainerPrefix
 	case ForNilPtr:
 		return NilPtrName
+	case ForIntX:
+		return IntXName
+	case ForUintX:
+		return UintXName
 	case Unknown:
 		return "Unknown"
 	default:
@@ -429,57 +468,59 @@ func (p *parentInfo) isValid() bool {
 	return p != nil && p.value.IsValid()
 }
 
-func (p *parentInfo) callIns(val reflect.Value) []reflect.Value {
-	ret := make([]reflect.Value, 4)
+func (p *parentInfo) callIns(ctx *TravContext, val reflect.Value) []reflect.Value {
+	ret := make([]reflect.Value, 5)
+	ret[0] = reflect.ValueOf(ctx)
 	if p != nil && p.value.IsValid() {
-		ret[0] = reflect.ValueOf(p.depth)
+		ret[1] = reflect.ValueOf(p.depth)
 		if len(p.structFields) > 0 && p.offset >= 0 && p.offset < len(p.structFields) {
 			if p.structFields[p.offset].IndexForReal >= 0 {
-				ret[1] = reflect.ValueOf(p.structFields[p.offset].IndexForReal)
+				ret[2] = reflect.ValueOf(p.structFields[p.offset].IndexForReal)
 			} else {
-				ret[1] = reflect.ValueOf(p.structFields[p.offset].Index)
+				ret[2] = reflect.ValueOf(p.structFields[p.offset].Index)
 			}
-			ret[2] = reflect.ValueOf(p.structFields[p.offset].Name)
+			ret[3] = reflect.ValueOf(p.structFields[p.offset].Name)
 		} else {
-			ret[1] = reflect.ValueOf(p.offset)
-			ret[2] = reflect.ValueOf("")
+			ret[2] = reflect.ValueOf(p.offset)
+			ret[3] = reflect.ValueOf("")
 		}
 	} else {
-		ret[0] = reflect.ValueOf(0)
-		ret[1] = reflect.ValueOf(int(-1))
-		ret[2] = reflect.ValueOf("")
+		ret[1] = reflect.ValueOf(0)
+		ret[2] = reflect.ValueOf(int(-1))
+		ret[3] = reflect.ValueOf("")
 	}
-	ret[3] = val
+	ret[4] = val
 	return ret
 }
 
-func (p *parentInfo) _containerIns(info *parentInfo, startOrEnd bool, val reflect.Value) []reflect.Value {
-	ret := make([]reflect.Value, 6)
+func (p *parentInfo) _containerIns(ctx *TravContext, info *parentInfo, startOrEnd bool, val reflect.Value) []reflect.Value {
+	ret := make([]reflect.Value, 7)
+	ret[0] = reflect.ValueOf(ctx)
 	if p != nil && p.value.IsValid() {
-		ret[0] = reflect.ValueOf(p.depth)
-		ret[1] = reflect.ValueOf(p.offset)
+		ret[1] = reflect.ValueOf(p.depth)
+		ret[2] = reflect.ValueOf(p.offset)
 		if len(p.structFields) > 0 && p.offset >= 0 && p.offset < len(p.structFields) {
-			ret[4] = reflect.ValueOf(p.structFields[p.offset].Name)
+			ret[5] = reflect.ValueOf(p.structFields[p.offset].Name)
 		} else {
-			ret[4] = reflect.ValueOf("")
+			ret[5] = reflect.ValueOf("")
 		}
 	} else {
-		ret[0] = reflect.ValueOf(0)
-		ret[1] = reflect.ValueOf(int(-1))
-		ret[4] = reflect.ValueOf("")
+		ret[1] = reflect.ValueOf(0)
+		ret[2] = reflect.ValueOf(int(-1))
+		ret[5] = reflect.ValueOf("")
 	}
-	ret[2] = reflect.ValueOf(info.size)
-	ret[3] = reflect.ValueOf(startOrEnd)
-	ret[5] = val
+	ret[3] = reflect.ValueOf(info.size)
+	ret[4] = reflect.ValueOf(startOrEnd)
+	ret[6] = val
 	return ret
 }
 
-func (p *parentInfo) startContainerIns(info *parentInfo, val reflect.Value) []reflect.Value {
-	return p._containerIns(info, true, val)
+func (p *parentInfo) startContainerIns(ctx *TravContext, info *parentInfo, val reflect.Value) []reflect.Value {
+	return p._containerIns(ctx, info, true, val)
 }
 
-func (p *parentInfo) endContainerIns(info *parentInfo, val reflect.Value) []reflect.Value {
-	return p._containerIns(info, false, val)
+func (p *parentInfo) endContainerIns(ctx *TravContext, info *parentInfo, val reflect.Value) []reflect.Value {
+	return p._containerIns(ctx, info, false, val)
 }
 
 func (p *parentInfo) nextDepth() int {
@@ -487,4 +528,21 @@ func (p *parentInfo) nextDepth() int {
 		return 1
 	}
 	return p.depth + 1
+}
+
+type TravContext struct {
+	locals sync.Map
+}
+
+func NewContext() *TravContext {
+	return &TravContext{locals: sync.Map{}}
+}
+
+func (c *TravContext) GetLocal(key interface{}) (interface{}, bool) {
+	return c.locals.Load(key)
+}
+
+func (c *TravContext) PutLocal(key, val interface{}) *TravContext {
+	c.locals.Store(key, val)
+	return c
 }
