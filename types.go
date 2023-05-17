@@ -82,6 +82,7 @@ const (
 	ForNilPtr    ItemType = 4
 	ForIntX      ItemType = 5 // for int/int8/int16/int32/int64
 	ForUintX     ItemType = 6 // for uint/uint8/uint16/uint32/uint64
+	ForAllKinds  ItemType = 7 // process all unintercepted values at the end
 	Unknown      ItemType = 0xff
 
 	ImplPrefix       = "ForImpl"
@@ -91,6 +92,7 @@ const (
 	NilPtrName       = "ForNilPtr"
 	IntXName         = "ForIntX"
 	UintXName        = "ForUintX"
+	AllKindsName     = "ForAllKinds"
 	_minPrefixLength = 7
 )
 
@@ -110,7 +112,8 @@ const (
 // 如果没有，则用类型对应的Kind找方法。
 // 如果都没有，则忽略
 type (
-	ItemType uint8
+	ItemType  uint8
+	ItemTypes []ItemType
 
 	orderItem struct {
 		i int          // index of the method list of adapter
@@ -167,6 +170,8 @@ func (ItemType) Which(name string) (ItemType, reflect.Kind, bool) {
 		return ForIntX, reflect.Invalid, true
 	case UintXName:
 		return ForUintX, reflect.Invalid, true
+	case AllKindsName:
+		return ForAllKinds, reflect.Invalid, true
 	default:
 		if name[:len(ImplPrefix)] == ImplPrefix {
 			return ForImpl, reflect.Invalid, true
@@ -214,6 +219,8 @@ func (i ItemType) MatchValue(val reflect.Value) bool {
 			return true
 		}
 		return false
+	case ForAllKinds:
+		return true
 	default:
 		return false
 	}
@@ -226,6 +233,7 @@ func (i ItemType) MatchValue(val reflect.Value) bool {
 // ForNilPtr(*TravContext, Depth, IndexInParent, PropertyName, Property) error
 // ForIntX(*TravContext, Depth, IndexInParent, PropertyName, Property) error
 // ForUintX(*TravContext, Depth, IndexInParent, PropertyName, Property) error
+// ForAllKinds(*TravContext, Depth, IndexInParent, PropertyName, Property) error
 // ForKind:
 //
 //	normal kinds: ForKindYYYY(*TravContext, Depth, IndexInParent, PropertyName, Property) error,
@@ -243,7 +251,7 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 		return false
 	}
 	switch i {
-	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX:
+	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX, ForAllKinds:
 		if ftype.In(1) != _typeOfTravCtxPtr || ftype.In(2) != _typeOfInt ||
 			ftype.In(3) != _typeOfInt || ftype.In(4) != _typeOfString {
 			return false
@@ -272,7 +280,7 @@ func (i ItemType) IsValidWithReceiver(method reflect.Method) bool {
 
 func (i ItemType) parseReturns(outs []reflect.Value) (goin bool, err error) {
 	switch i {
-	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX:
+	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX, ForAllKinds:
 		if len(outs) != 1 {
 			return false, ErrWant1Return
 		}
@@ -301,13 +309,21 @@ func (i ItemType) parseReturns(outs []reflect.Value) (goin bool, err error) {
 
 func (i ItemType) ParamLength() int {
 	switch i {
-	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX:
+	case ForImpl, ForAssign, ForKind, ForNilPtr, ForIntX, ForUintX, ForAllKinds:
 		return 5
 	case ForContainer:
 		return 7
 	default:
 		return 0
 	}
+}
+
+func (i ItemType) Prefix() bool {
+	return i == ForNilPtr
+}
+
+func (i ItemType) Suffix() bool {
+	return i == ForIntX || i == ForUintX || i == ForAllKinds
 }
 
 func (i ItemType) String() string {
@@ -326,11 +342,33 @@ func (i ItemType) String() string {
 		return IntXName
 	case ForUintX:
 		return UintXName
+	case ForAllKinds:
+		return AllKindsName
 	case Unknown:
 		return "Unknown"
 	default:
 		return "N/A"
 	}
+}
+
+func (is ItemTypes) Len() int {
+	return len(is)
+}
+
+func (is ItemTypes) Swap(i, j int) {
+	is[i], is[j] = is[j], is[i]
+}
+
+func (is ItemTypes) Less(i, j int) bool {
+	return int(is[i]) < int(is[j])
+}
+
+func (is ItemTypes) String() string {
+	strs := make([]string, 0, len(is))
+	for _, i := range is {
+		strs = append(strs, i.String())
+	}
+	return fmt.Sprintf("%s", strs)
 }
 
 func (i orderItem) Type() (ItemType, bool) {

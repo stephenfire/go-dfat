@@ -28,12 +28,13 @@ import (
 )
 
 type Inner0 struct {
-	A int  `rtlorder:"0"`
-	E int  `rtlorder:"5"`
-	B int  `rtlorder:"1"`
-	C int  `rtlorder:"3"`
-	D int  `rtlorder:"4"`
-	Z *int `rtlorder:"6"`
+	A int   `rtlorder:"0"`
+	E int   `rtlorder:"5"`
+	B int   `rtlorder:"1"`
+	C int   `rtlorder:"3"`
+	D int   `rtlorder:"4"`
+	F int16 `rtlorder:"7"`
+	Z *int  `rtlorder:"6"`
 }
 
 type parser0 struct{}
@@ -75,6 +76,23 @@ type parser3 struct {
 func (p parser3) ForIntX(_ *TravContext, depth, indexOfParent int, name string, property interface{}) error {
 	fmt.Printf("ForIntX(Depth:%d Index:%d name:%s prop:%s)\n", depth, indexOfParent, name, reflect.TypeOf(property))
 	return nil
+}
+
+type parser4 struct{}
+
+func (p parser4) ForAllKinds(_ *TravContext, depth, indexOfParent int, name string, property interface{}) error {
+	fmt.Printf("ForAllKinds(Depth:%d Index:%d name:%s prop:%s)\n", depth, indexOfParent, name, reflect.TypeOf(property))
+	return nil
+}
+
+type parser5 struct {
+	parser4
+}
+
+func (p parser5) ForContainerStruct(_ *TravContext, depth, indexOfParent, size int, startOrEnd bool, name string, property interface{}) (goin bool, err error) {
+	fmt.Printf("ForContainerStruct(depth:%d index:%d size:%d start:%t name:%s property:%s)\n",
+		depth, indexOfParent, size, startOrEnd, name, reflect.TypeOf(property))
+	return true, nil
 }
 
 type rtlpropertier struct{}
@@ -158,7 +176,7 @@ func TestStruct(t *testing.T) {
 	{
 		t.Log("parser0")
 		p := parser0{}
-		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true, IgnoreMissedBinding: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,7 +193,7 @@ func TestStruct(t *testing.T) {
 	{
 		t.Log("parser1")
 		p := parser1{}
-		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true, ContainerEnd: true})
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true, ContainerEnd: true, IgnoreMissedBinding: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -192,7 +210,7 @@ func TestStruct(t *testing.T) {
 	{
 		t.Log("parser2")
 		p := parser2{}
-		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true, IgnoreMissedBinding: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,6 +241,40 @@ func TestStruct(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	{
+		t.Log("parser4")
+		p := parser4{}
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Log(tr)
+		if err = tr.Traverse(ctx, i); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Log("nil")
+		if err = tr.Traverse(ctx, i1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	{
+		t.Log("parser5")
+		p := parser5{}
+		tr, err := NewTraveller(p, &TraverseConf{PtrAutoGoIn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Log(tr)
+		if err = tr.Traverse(ctx, i); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Log("nil")
+		if err = tr.Traverse(ctx, i1); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestWithSelfParser(t *testing.T) {
@@ -234,7 +286,7 @@ func TestWithSelfParser(t *testing.T) {
 		D: 5,
 	}
 	p := parser1{}
-	tr, err := NewTraveller(p, &TraverseConf{Propertier: rtlpropertier{}, PtrAutoGoIn: true, ContainerEnd: true})
+	tr, err := NewTraveller(p, &TraverseConf{Propertier: rtlpropertier{}, PtrAutoGoIn: true, ContainerEnd: true, IgnoreMissedBinding: true})
 	if err != nil {
 		t.Fatal(err)
 	}

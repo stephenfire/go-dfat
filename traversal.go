@@ -28,7 +28,9 @@ import (
 type Traveller struct {
 	adapter         reflect.Value
 	conf            *TraverseConf
-	shortcuts       map[ItemType]reflect.Value     // ForNilPtr/ForIntX/ForUintX -> binding methods
+	prefixes        ItemTypes                      // group bindings run before all individually bindings
+	suffixes        ItemTypes                      // group bindings run after all individually bindings
+	shortcuts       map[ItemType]reflect.Value     // group bindings(ForNilPtr/ForIntX/ForUintX/ForAllKinds) -> binding methods
 	typeMethods     map[reflect.Type]reflect.Value // type -> method
 	kindMethods     map[reflect.Kind]reflect.Value // kind -> method
 	typeOrder       orderItems                     // all type list in order (tag order or declare order)
@@ -83,14 +85,14 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 				k: inKind,
 			})
 			kindMethods[inKind] = aptVal.Method(i)
-		case ForNilPtr, ForIntX, ForUintX:
+		case ForNilPtr, ForIntX, ForUintX, ForAllKinds:
 			if _, exist := shortcuts[itype]; exist {
 				return nil, fmt.Errorf("duplicated binding function %s found", m.Name)
 			}
 			shortcuts[itype] = aptVal.Method(i)
 		}
 	}
-	if len(items) == 0 {
+	if len(items) == 0 && len(shortcuts) == 0 {
 		return nil, errors.New("no available binding function found")
 	}
 	sort.Sort(items)
@@ -98,9 +100,23 @@ func NewTraveller(adapter interface{}, config ...*TraverseConf) (*Traveller, err
 	if len(config) > 0 && config[0] != nil {
 		conf = config[0].Clone()
 	}
+	var prefixs, suffixs ItemTypes
+	if len(shortcuts) > 0 {
+		for k := range shortcuts {
+			if k.Prefix() {
+				prefixs = append(prefixs, k)
+			} else if k.Suffix() {
+				suffixs = append(suffixs, k)
+			}
+		}
+		sort.Sort(prefixs)
+		sort.Sort(suffixs)
+	}
 	return &Traveller{
 		adapter:     aptVal,
 		conf:        conf,
+		prefixes:    prefixs,
+		suffixes:    suffixs,
 		shortcuts:   shortcuts,
 		typeMethods: typeMethods,
 		kindMethods: kindMethods,
@@ -119,19 +135,8 @@ func (t *Traveller) String() string {
 		typ := t.adapter.Type()
 		adapterStr = fmt.Sprintf("adapter:%s", typ.Name())
 	}
-	var keys []ItemType
-	for k := range t.shortcuts {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		return int(keys[i]) < int(keys[j])
-	})
-	var keystrings []string
-	for _, k := range keys {
-		keystrings = append(keystrings, k.String())
-	}
-	return fmt.Sprintf("Traveller{%s Shortcuts:%s Types:%d Kinds:%d Items:%s}",
-		adapterStr, keystrings, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
+	return fmt.Sprintf("Traveller{%s Prefixs:%s Suffixs:%s Types:%d Kinds:%d Items:%s}",
+		adapterStr, t.prefixes, t.suffixes, len(t.typeMethods), len(t.kindMethods), []orderItem(t.typeOrder))
 }
 
 func (t *Traveller) _call(ctx *TravContext, parent *parentInfo, val reflect.Value) (goin, reEnter bool,
@@ -140,11 +145,12 @@ func (t *Traveller) _call(ctx *TravContext, parent *parentInfo, val reflect.Valu
 		return false, false, nil, reflect.Value{}, errors.New("invalid value")
 	}
 
-	// shortcuts
-	for itype, method := range t.shortcuts {
+	// prefix shortcuts
+	for _, itype := range t.prefixes {
 		if itype.MatchValue(val) {
+			method := t.shortcuts[itype]
 			outs := method.Call(parent.callIns(ctx, val))
-			_, err = ForNilPtr.parseReturns(outs)
+			_, err = itype.parseReturns(outs)
 			return false, false, nil, reflect.Value{}, err
 		}
 	}
@@ -218,6 +224,15 @@ func (t *Traveller) _call(ctx *TravContext, parent *parentInfo, val reflect.Valu
 			} else {
 				return false, false, parent, reflect.Value{}, nil
 			}
+		}
+	}
+	// suffix shortcuts
+	for _, itype := range t.suffixes {
+		if itype.MatchValue(val) {
+			method := t.shortcuts[itype]
+			outs := method.Call(parent.callIns(ctx, val))
+			_, err = itype.parseReturns(outs)
+			return false, false, nil, reflect.Value{}, err
 		}
 	}
 	// emit error if there's no flag for ignoring
